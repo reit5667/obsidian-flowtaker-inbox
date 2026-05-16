@@ -6,6 +6,8 @@ interface Settings {
   inboxPath: string;
   pollingIntervalSeconds: number;
   lastUpdateId: number;
+  groqApiKey: string;
+  lastSavedFile: string;
 }
 
 const DEFAULTS: Settings = {
@@ -14,6 +16,8 @@ const DEFAULTS: Settings = {
   inboxPath: "inbox",
   pollingIntervalSeconds: 30,
   lastUpdateId: 0,
+  groqApiKey: "",
+  lastSavedFile: "",
 };
 
 // --- Telegram API types ---
@@ -25,12 +29,17 @@ interface TgUser {
   username?: string;
 }
 
+interface TgVoice {
+  file_id: string;
+  duration: number;
+}
+
 interface TgMessage {
   message_id: number;
   from?: TgUser;
   date: number;
   text?: string;
-  // forward_origin (Bot API 7.0+)
+  voice?: TgVoice;
   forward_origin?: {
     type: "user" | "hidden_user" | "chat" | "channel";
     sender_user?: TgUser;
@@ -38,7 +47,6 @@ interface TgMessage {
     sender_chat?: { title: string };
     chat?: { title: string };
   };
-  // legacy forward fields
   forward_from?: TgUser;
   forward_sender_name?: string;
   forward_from_chat?: { title: string };
@@ -77,9 +85,15 @@ function getForwardedFrom(msg: TgMessage): string | null {
   return msg.forward_sender_name ?? msg.forward_from_chat?.title ?? null;
 }
 
-function buildContent(text: string, utcSec: number, forwardedFrom: string | null): string {
-  let fm = `---\ncreated: ${buildIso(utcSec)}\nsource: telegram`;
+function extractTags(text: string): string[] {
+  const matches = text.match(/#[\wа-яёА-ЯЁ]+/gu) ?? [];
+  return matches.map((t) => t.slice(1));
+}
+
+function buildContent(text: string, utcSec: number, forwardedFrom: string | null, tags: string[], type: "text" | "voice"): string {
+  let fm = `---\ncreated: ${buildIso(utcSec)}\nsource: telegram\ntype: ${type}`;
   if (forwardedFrom) fm += `\nforwarded_from: ${forwardedFrom}`;
+  if (tags.length) fm += `\ntags: [${tags.join(", ")}]`;
   fm += "\n---\n\n";
   return fm + text;
 }
@@ -126,27 +140,117 @@ export default class TelegramInboxPlugin extends Plugin {
       return;
     }
 
-    if (!msg.text) {
-      await this.sendMessage(msg.from.id, "⚠️ Пока поддерживается только текст. Просто напиши что хочешь сохранить.");
+    // /status command
+    if (msg.text === "/status") {
+      const last = this.settings.lastSavedFile || "нет";
+      await this.sendMessage(msg.from.id, `✅ Плагин работает.\nПоследнее сохранение: ${last}`);
       await this.saveData(this.settings);
       return;
     }
 
-    const filename = buildFilename(msg.date);
-    const content = buildContent(msg.text, msg.date, getForwardedFrom(msg));
+    // voice message
+    if (msg.voice) {
+      await this.handleVoice(msg);
+      return;
+    }
+
+    // unsupported type
+    if (!msg.text) {
+      await this.sendMessage(msg.from.id, "⚠️ Пока поддерживается только текст и голосовые.");
+      await this.saveData(this.settings);
+      return;
+    }
+
+    // text message
+    const tags = extractTags(msg.text);
+    await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
+    await this.saveData(this.settings);
+  }
+
+  async handleVoice(msg: TgMessage) {
+    if (!msg.voice || !msg.from) return;
+
+    if (!this.settings.groqApiKey) {
+      await this.sendMessage(msg.from.id, "⚠️ Groq API key не указан. Добавь его в настройках плагина.");
+      await this.saveData(this.settings);
+      return;
+    }
+
+    await this.sendMessage(msg.from.id, "⏳ Расшифровываю голосовое...");
+
+    const text = await this.transcribeVoice(msg.voice.file_id);
+    if (!text) {
+      await this.sendMessage(msg.from.id, "❌ Не удалось расшифровать. Проверь Groq API key.");
+      await this.saveData(this.settings);
+      return;
+    }
+
+    const body = `🎤 _Голосовое_\n\n${text}`;
+    await this.saveNote(body, msg.date, getForwardedFrom(msg), extractTags(text), msg.from.id, "voice");
+    await this.saveData(this.settings);
+  }
+
+  async transcribeVoice(fileId: string): Promise<string | null> {
+    try {
+      // get file path from Telegram
+      const fileRes = await requestUrl({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/getFile?file_id=${fileId}`,
+      });
+      const filePath: string = fileRes.json?.result?.file_path;
+      if (!filePath) return null;
+
+      // download audio binary
+      const audioRes = await requestUrl({
+        url: `https://api.telegram.org/file/bot${this.settings.botToken}/${filePath}`,
+      });
+
+      // build multipart/form-data manually
+      const boundary = "----FlowBoundary" + Math.random().toString(36).slice(2);
+      const enc = new TextEncoder();
+      const preamble = enc.encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3-turbo\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="voice.ogg"\r\nContent-Type: audio/ogg\r\n\r\n`
+      );
+      const epilogue = enc.encode(`\r\n--${boundary}--\r\n`);
+      const audio = new Uint8Array(audioRes.arrayBuffer);
+
+      const body = new Uint8Array(preamble.byteLength + audio.byteLength + epilogue.byteLength);
+      body.set(preamble, 0);
+      body.set(audio, preamble.byteLength);
+      body.set(epilogue, preamble.byteLength + audio.byteLength);
+
+      const groqRes = await requestUrl({
+        url: "https://api.groq.com/openai/v1/audio/transcriptions",
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.settings.groqApiKey}`,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        },
+        body: body.buffer,
+      });
+
+      return groqRes.json?.text ?? null;
+    } catch (e) {
+      console.error("TelegramInbox transcribe error:", e);
+      return null;
+    }
+  }
+
+  async saveNote(text: string, utcSec: number, forwardedFrom: string | null, tags: string[], chatId: number, type: "text" | "voice") {
+    const filename = buildFilename(utcSec);
+    const content = buildContent(text, utcSec, forwardedFrom, tags, type);
     const path = `${this.settings.inboxPath.replace(/\/$/, "")}/${filename}`;
 
     try {
       await this.ensureFolder(this.settings.inboxPath);
       await this.app.vault.create(path, content);
+      this.settings.lastSavedFile = filename;
       new Notice(`✅ ${filename}`);
-      await this.sendMessage(msg.from.id, `✅ Сохранено: ${filename}`);
+      await this.sendMessage(chatId, `✅ Сохранено: ${filename}`);
     } catch (e) {
       console.error("TelegramInbox create error:", path, e);
       new Notice(`❌ Ошибка: ${filename}`);
     }
-
-    await this.saveData(this.settings);
   }
 
   async ensureFolder(path: string) {
@@ -246,6 +350,18 @@ class TelegramInboxSettingTab extends PluginSettingTab {
               this.plugin.settings.pollingIntervalSeconds = n;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Groq API Key")
+      .setDesc("Для расшифровки голосовых сообщений. Получить: console.groq.com")
+      .addText((t) =>
+        t.setPlaceholder("gsk_...")
+          .setValue(this.plugin.settings.groqApiKey)
+          .onChange(async (v) => {
+            this.plugin.settings.groqApiKey = v.trim();
+            await this.plugin.saveSettings();
           })
       );
   }

@@ -28,7 +28,9 @@ var DEFAULTS = {
   allowedUserId: 0,
   inboxPath: "inbox",
   pollingIntervalSeconds: 30,
-  lastUpdateId: 0
+  lastUpdateId: 0,
+  groqApiKey: "",
+  lastSavedFile: ""
 };
 function buildFilename(utcSec) {
   const d = new Date((utcSec + 3 * 3600) * 1e3);
@@ -57,13 +59,22 @@ function getForwardedFrom(msg) {
   }
   return (_d = (_c = msg.forward_sender_name) != null ? _c : (_b = msg.forward_from_chat) == null ? void 0 : _b.title) != null ? _d : null;
 }
-function buildContent(text, utcSec, forwardedFrom) {
+function extractTags(text) {
+  var _a;
+  const matches = (_a = text.match(/#[\wа-яёА-ЯЁ]+/gu)) != null ? _a : [];
+  return matches.map((t) => t.slice(1));
+}
+function buildContent(text, utcSec, forwardedFrom, tags, type) {
   let fm = `---
 created: ${buildIso(utcSec)}
-source: telegram`;
+source: telegram
+type: ${type}`;
   if (forwardedFrom)
     fm += `
 forwarded_from: ${forwardedFrom}`;
+  if (tags.length)
+    fm += `
+tags: [${tags.join(", ")}]`;
   fm += "\n---\n\n";
   return fm + text;
 }
@@ -104,24 +115,109 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       await this.saveData(this.settings);
       return;
     }
-    if (!msg.text) {
-      await this.sendMessage(msg.from.id, "\u26A0\uFE0F \u041F\u043E\u043A\u0430 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0441\u0442. \u041F\u0440\u043E\u0441\u0442\u043E \u043D\u0430\u043F\u0438\u0448\u0438 \u0447\u0442\u043E \u0445\u043E\u0447\u0435\u0448\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C.");
+    if (msg.text === "/status") {
+      const last = this.settings.lastSavedFile || "\u043D\u0435\u0442";
+      await this.sendMessage(msg.from.id, `\u2705 \u041F\u043B\u0430\u0433\u0438\u043D \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442.
+\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435: ${last}`);
       await this.saveData(this.settings);
       return;
     }
-    const filename = buildFilename(msg.date);
-    const content = buildContent(msg.text, msg.date, getForwardedFrom(msg));
+    if (msg.voice) {
+      await this.handleVoice(msg);
+      return;
+    }
+    if (!msg.text) {
+      await this.sendMessage(msg.from.id, "\u26A0\uFE0F \u041F\u043E\u043A\u0430 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0441\u0442 \u0438 \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u044B\u0435.");
+      await this.saveData(this.settings);
+      return;
+    }
+    const tags = extractTags(msg.text);
+    await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
+    await this.saveData(this.settings);
+  }
+  async handleVoice(msg) {
+    if (!msg.voice || !msg.from)
+      return;
+    if (!this.settings.groqApiKey) {
+      await this.sendMessage(msg.from.id, "\u26A0\uFE0F Groq API key \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D. \u0414\u043E\u0431\u0430\u0432\u044C \u0435\u0433\u043E \u0432 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0430\u0445 \u043F\u043B\u0430\u0433\u0438\u043D\u0430.");
+      await this.saveData(this.settings);
+      return;
+    }
+    await this.sendMessage(msg.from.id, "\u23F3 \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u044B\u0432\u0430\u044E \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u043E\u0435...");
+    const text = await this.transcribeVoice(msg.voice.file_id);
+    if (!text) {
+      await this.sendMessage(msg.from.id, "\u274C \u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0440\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u0430\u0442\u044C. \u041F\u0440\u043E\u0432\u0435\u0440\u044C Groq API key.");
+      await this.saveData(this.settings);
+      return;
+    }
+    const body = `\u{1F3A4} _\u0413\u043E\u043B\u043E\u0441\u043E\u0432\u043E\u0435_
+
+${text}`;
+    await this.saveNote(body, msg.date, getForwardedFrom(msg), extractTags(text), msg.from.id, "voice");
+    await this.saveData(this.settings);
+  }
+  async transcribeVoice(fileId) {
+    var _a, _b, _c, _d;
+    try {
+      const fileRes = await (0, import_obsidian.requestUrl)({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/getFile?file_id=${fileId}`
+      });
+      const filePath = (_b = (_a = fileRes.json) == null ? void 0 : _a.result) == null ? void 0 : _b.file_path;
+      if (!filePath)
+        return null;
+      const audioRes = await (0, import_obsidian.requestUrl)({
+        url: `https://api.telegram.org/file/bot${this.settings.botToken}/${filePath}`
+      });
+      const boundary = "----FlowBoundary" + Math.random().toString(36).slice(2);
+      const enc = new TextEncoder();
+      const preamble = enc.encode(
+        `--${boundary}\r
+Content-Disposition: form-data; name="model"\r
+\r
+whisper-large-v3-turbo\r
+--${boundary}\r
+Content-Disposition: form-data; name="file"; filename="voice.ogg"\r
+Content-Type: audio/ogg\r
+\r
+`
+      );
+      const epilogue = enc.encode(`\r
+--${boundary}--\r
+`);
+      const audio = new Uint8Array(audioRes.arrayBuffer);
+      const body = new Uint8Array(preamble.byteLength + audio.byteLength + epilogue.byteLength);
+      body.set(preamble, 0);
+      body.set(audio, preamble.byteLength);
+      body.set(epilogue, preamble.byteLength + audio.byteLength);
+      const groqRes = await (0, import_obsidian.requestUrl)({
+        url: "https://api.groq.com/openai/v1/audio/transcriptions",
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.settings.groqApiKey}`,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`
+        },
+        body: body.buffer
+      });
+      return (_d = (_c = groqRes.json) == null ? void 0 : _c.text) != null ? _d : null;
+    } catch (e) {
+      console.error("TelegramInbox transcribe error:", e);
+      return null;
+    }
+  }
+  async saveNote(text, utcSec, forwardedFrom, tags, chatId, type) {
+    const filename = buildFilename(utcSec);
+    const content = buildContent(text, utcSec, forwardedFrom, tags, type);
     const path = `${this.settings.inboxPath.replace(/\/$/, "")}/${filename}`;
     try {
       await this.ensureFolder(this.settings.inboxPath);
       await this.app.vault.create(path, content);
+      this.settings.lastSavedFile = filename;
       new import_obsidian.Notice(`\u2705 ${filename}`);
-      await this.sendMessage(msg.from.id, `\u2705 \u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: ${filename}`);
+      await this.sendMessage(chatId, `\u2705 \u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: ${filename}`);
     } catch (e) {
       console.error("TelegramInbox create error:", path, e);
       new import_obsidian.Notice(`\u274C \u041E\u0448\u0438\u0431\u043A\u0430: ${filename}`);
     }
-    await this.saveData(this.settings);
   }
   async ensureFolder(path) {
     let current = "";
@@ -187,6 +283,12 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
           this.plugin.settings.pollingIntervalSeconds = n;
           await this.plugin.saveSettings();
         }
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Groq API Key").setDesc("\u0414\u043B\u044F \u0440\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u043A\u0438 \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u044B\u0445 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439. \u041F\u043E\u043B\u0443\u0447\u0438\u0442\u044C: console.groq.com").addText(
+      (t) => t.setPlaceholder("gsk_...").setValue(this.plugin.settings.groqApiKey).onChange(async (v) => {
+        this.plugin.settings.groqApiKey = v.trim();
+        await this.plugin.saveSettings();
       })
     );
   }

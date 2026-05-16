@@ -1,0 +1,9 @@
+{
+  "id": "flowtaker-inbox",
+  "name": "Flowtaker Inbox",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Save Telegram messages directly to Obsidian vault inbox",
+  "author": "vsharavin",
+  "isDesktopOnly": false
+}

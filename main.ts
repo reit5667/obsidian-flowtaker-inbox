@@ -1,9 +1,10 @@
-import { App, Notice, Platform, Plugin, PluginSettingTab, Setting, requestUrl } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from "obsidian";
 
 interface Settings {
   botToken: string;
   allowedUserId: number;
   inboxPath: string;
+  todosPath: string;
   pollingIntervalSeconds: number;
   lastUpdateId: number;
   groqApiKey: string;
@@ -14,6 +15,7 @@ const DEFAULTS: Settings = {
   botToken: "",
   allowedUserId: 0,
   inboxPath: "inbox",
+  todosPath: "todos.md",
   pollingIntervalSeconds: 30,
   lastUpdateId: 0,
   groqApiKey: "",
@@ -110,10 +112,10 @@ export default class TelegramInboxPlugin extends Plugin {
   }
 
   startPolling() {
-    if (!Platform.isDesktop) return;
     const ms = Math.max(5, this.settings.pollingIntervalSeconds) * 1000;
     this.registerInterval(window.setInterval(() => this.poll(), ms));
-    this.poll();
+    // delay first poll to let vault finish loading
+    setTimeout(() => this.poll(), 3000);
   }
 
   async poll() {
@@ -132,10 +134,10 @@ export default class TelegramInboxPlugin extends Plugin {
   }
 
   async handleUpdate(update: TgUpdate) {
-    this.settings.lastUpdateId = update.update_id;
     const msg = update.message;
 
     if (!msg || msg.from?.id !== this.settings.allowedUserId) {
+      this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
     }
@@ -144,34 +146,43 @@ export default class TelegramInboxPlugin extends Plugin {
     if (msg.text === "/status") {
       const last = this.settings.lastSavedFile || "нет";
       await this.sendMessage(msg.from.id, `✅ Плагин работает.\nПоследнее сохранение: ${last}`);
+      this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
     }
 
     // voice message
     if (msg.voice) {
-      await this.handleVoice(msg);
+      await this.handleVoice(msg, update.update_id);
       return;
     }
 
     // unsupported type
     if (!msg.text) {
       await this.sendMessage(msg.from.id, "⚠️ Пока поддерживается только текст и голосовые.");
+      this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
     }
 
     // text message
     const tags = extractTags(msg.text);
-    await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
-    await this.saveData(this.settings);
+    const hasTodoTag = tags.includes("todo") || tags.includes("todos");
+    const saved = hasTodoTag
+      ? await this.processTodosMessage(msg.text, msg.from.id)
+      : await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
+    if (saved) {
+      this.settings.lastUpdateId = update.update_id;
+      await this.saveData(this.settings);
+    }
   }
 
-  async handleVoice(msg: TgMessage) {
+  async handleVoice(msg: TgMessage, updateId: number) {
     if (!msg.voice || !msg.from) return;
 
     if (!this.settings.groqApiKey) {
       await this.sendMessage(msg.from.id, "⚠️ Groq API key не указан. Добавь его в настройках плагина.");
+      this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
     }
@@ -181,13 +192,17 @@ export default class TelegramInboxPlugin extends Plugin {
     const text = await this.transcribeVoice(msg.voice.file_id);
     if (!text) {
       await this.sendMessage(msg.from.id, "❌ Не удалось расшифровать. Проверь Groq API key.");
+      this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
     }
 
     const body = `🎤 _Голосовое_\n\n${text}`;
-    await this.saveNote(body, msg.date, getForwardedFrom(msg), extractTags(text), msg.from.id, "voice");
-    await this.saveData(this.settings);
+    const saved = await this.saveNote(body, msg.date, getForwardedFrom(msg), extractTags(text), msg.from.id, "voice");
+    if (saved) {
+      this.settings.lastUpdateId = updateId;
+      await this.saveData(this.settings);
+    }
   }
 
   async transcribeVoice(fileId: string): Promise<string | null> {
@@ -236,7 +251,7 @@ export default class TelegramInboxPlugin extends Plugin {
     }
   }
 
-  async saveNote(text: string, utcSec: number, forwardedFrom: string | null, tags: string[], chatId: number, type: "text" | "voice") {
+  async saveNote(text: string, utcSec: number, forwardedFrom: string | null, tags: string[], chatId: number, type: "text" | "voice"): Promise<boolean> {
     const filename = buildFilename(utcSec);
     const content = buildContent(text, utcSec, forwardedFrom, tags, type);
     const path = `${this.settings.inboxPath.replace(/\/$/, "")}/${filename}`;
@@ -247,9 +262,62 @@ export default class TelegramInboxPlugin extends Plugin {
       this.settings.lastSavedFile = filename;
       new Notice(`✅ ${filename}`);
       await this.sendMessage(chatId, `✅ Сохранено: ${filename}`);
+      return true;
     } catch (e) {
       console.error("TelegramInbox create error:", path, e);
       new Notice(`❌ Ошибка: ${filename}`);
+      return false;
+    }
+  }
+
+  async processTodosMessage(text: string, chatId: number): Promise<boolean> {
+    const todoPath = this.settings.todosPath || "todos.md";
+    const lines: string[] = [];
+    const taskTexts: string[] = [];
+
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      const lineTags = extractTags(line);
+      if (lineTags.includes("todo") && !lineTags.includes("todos")) {
+        const taskText = line.replace(/#todo\b/giu, "").replace(/\s{2,}/g, " ").trim();
+        if (taskText) { lines.push(`- [ ] ${taskText}`); taskTexts.push(taskText); }
+      } else if (lineTags.includes("todos")) {
+        const contextText = line.replace(/#todos\b/giu, "").replace(/\s{2,}/g, " ").trim();
+        if (contextText) lines.push(contextText);
+      } else {
+        lines.push(line);
+      }
+    }
+
+    if (!lines.length) return true;
+
+    try {
+      const folder = todoPath.includes("/") ? todoPath.slice(0, todoPath.lastIndexOf("/")) : "";
+      if (folder) await this.ensureFolder(folder);
+      const existing = this.app.vault.getAbstractFileByPath(todoPath);
+      const entry = lines.join("\n") + "\n";
+      if (existing instanceof TFile) {
+        const content = await this.app.vault.read(existing);
+        const separator = content.endsWith("\n") ? "" : "\n";
+        await this.app.vault.modify(existing, content + separator + entry);
+      } else {
+        await this.app.vault.create(todoPath, entry);
+      }
+
+      if (taskTexts.length) {
+        const preview = taskTexts.map(t => `«${t.length > 60 ? t.slice(0, 60) + "…" : t}»`).join(", ");
+        new Notice(`✅ Todo: ${taskTexts[0].slice(0, 50)}`);
+        await this.sendMessage(chatId, `✅ Задача: ${preview}`);
+      } else {
+        new Notice("✅ Контекст добавлен");
+        await this.sendMessage(chatId, "✅ Контекст добавлен");
+      }
+      return true;
+    } catch (e) {
+      console.error("TelegramInbox todo error:", todoPath, e);
+      new Notice("❌ Ошибка сохранения задачи");
+      return false;
     }
   }
 
@@ -334,6 +402,18 @@ class TelegramInboxSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.inboxPath)
           .onChange(async (v) => {
             this.plugin.settings.inboxPath = v.trim() || "inbox";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Todos Path")
+      .setDesc("Файл для задач (сообщения с тегом #todo)")
+      .addText((t) =>
+        t.setPlaceholder("todos.md")
+          .setValue(this.plugin.settings.todosPath)
+          .onChange(async (v) => {
+            this.plugin.settings.todosPath = v.trim() || "todos.md";
             await this.plugin.saveSettings();
           })
       );

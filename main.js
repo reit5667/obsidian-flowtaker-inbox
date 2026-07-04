@@ -127,9 +127,9 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       return;
     }
     if (msg.text === "/status") {
-      const last = this.settings.lastSavedFile || "\u043D\u0435\u0442";
-      await this.sendMessage(msg.from.id, `\u2705 \u041F\u043B\u0430\u0433\u0438\u043D \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442.
-\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435: ${last}`);
+      const last = this.settings.lastSavedFile || "none";
+      await this.sendMessage(msg.from.id, `\u2705 Plugin is running.
+Last saved: ${last}`);
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -139,7 +139,7 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       return;
     }
     if (!msg.text) {
-      await this.sendMessage(msg.from.id, "\u26A0\uFE0F \u041F\u043E\u043A\u0430 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0441\u0442 \u0438 \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u044B\u0435.");
+      await this.sendMessage(msg.from.id, "\u26A0\uFE0F Only text and voice messages are supported.");
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -166,22 +166,22 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       return;
     this.pendingTasks.delete(msgId);
     const targetPath = dest === "sprint" ? this.settings.sprintPath || "daily.todos.4.md" : this.settings.todosPath || "backlog.md";
-    const label = dest === "sprint" ? "\u0441\u043F\u0440\u0438\u043D\u0442" : "\u0431\u044D\u043A\u043B\u043E\u0433";
+    const label = dest === "sprint" ? "sprint" : "backlog";
     await this.appendTodos(tasks, targetPath, cq.from.id, label);
   }
   async handleVoice(msg, updateId) {
     if (!msg.voice || !msg.from)
       return;
     if (!this.settings.groqApiKey) {
-      await this.sendMessage(msg.from.id, "\u26A0\uFE0F Groq API key \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D. \u0414\u043E\u0431\u0430\u0432\u044C \u0435\u0433\u043E \u0432 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0430\u0445 \u043F\u043B\u0430\u0433\u0438\u043D\u0430.");
+      await this.sendMessage(msg.from.id, "\u26A0\uFE0F Groq API key is not set. Add it in plugin settings.");
       this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
     }
-    await this.sendMessage(msg.from.id, "\u23F3 \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u044B\u0432\u0430\u044E \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u043E\u0435...");
+    await this.sendMessage(msg.from.id, "\u23F3 Transcribing voice message...");
     const text = await this.transcribeVoice(msg.voice.file_id);
     if (!text) {
-      await this.sendMessage(msg.from.id, "\u274C \u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0440\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u0430\u0442\u044C. \u041F\u0440\u043E\u0432\u0435\u0440\u044C Groq API key.");
+      await this.sendMessage(msg.from.id, "\u274C Transcription failed. Check your Groq API key.");
       this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
@@ -252,11 +252,11 @@ Content-Type: audio/ogg\r
       await this.app.vault.create(path, content);
       this.settings.lastSavedFile = filename;
       new import_obsidian.Notice(`\u2705 ${filename}`);
-      await this.sendMessage(chatId, `\u2705 \u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: ${filename}`);
+      await this.sendMessage(chatId, `\u2705 Saved: ${filename}`);
       return true;
     } catch (e) {
       console.error("TelegramInbox create error:", path, e);
-      new import_obsidian.Notice(`\u274C \u041E\u0448\u0438\u0431\u043A\u0430: ${filename}`);
+      new import_obsidian.Notice(`\u274C Error: ${filename}`);
       return false;
     }
   }
@@ -288,7 +288,7 @@ Content-Type: audio/ogg\r
     const preview = taskTexts.length ? taskTexts.map((t) => `\u2022 ${t.length > 50 ? t.slice(0, 50) + "\u2026" : t}`).join("\n") : lines[0];
     await this.sendMessageWithButtons(
       chatId,
-      `\u{1F4CB} \u041A\u0443\u0434\u0430 \u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C?
+      `\u{1F4CB} Where to add?
 
 ${preview}`,
       msgId
@@ -312,11 +312,11 @@ ${preview}`,
       }
       const firstTask = (_b = (_a = lines.find((l) => l.startsWith("- [ ]"))) == null ? void 0 : _a.slice(6)) != null ? _b : lines[0];
       new import_obsidian.Notice(`\u2705 ${label}: ${firstTask.slice(0, 40)}`);
-      await this.sendMessage(chatId, `\u2705 \u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 ${label}`);
+      await this.sendMessage(chatId, `\u2705 Added to ${label}`);
     } catch (e) {
       console.error("TelegramInbox appendTodos error:", filePath, e);
-      new import_obsidian.Notice("\u274C \u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u0437\u0430\u0434\u0430\u0447\u0438");
-      await this.sendMessage(chatId, "\u274C \u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u0437\u0430\u0434\u0430\u0447\u0443");
+      new import_obsidian.Notice("\u274C Failed to save task");
+      await this.sendMessage(chatId, "\u274C Failed to save task");
     }
   }
   async ensureFolder(path) {
@@ -351,8 +351,8 @@ ${preview}`,
           text,
           reply_markup: {
             inline_keyboard: [[
-              { text: "\u{1F4CB} \u0412 \u0441\u043F\u0440\u0438\u043D\u0442", callback_data: `sprint:${msgId}` },
-              { text: "\u{1F4E6} \u0412 \u0431\u044D\u043A\u043B\u043E\u0433", callback_data: `backlog:${msgId}` }
+              { text: "\u{1F4CB} To sprint", callback_data: `sprint:${msgId}` },
+              { text: "\u{1F4E6} To backlog", callback_data: `backlog:${msgId}` }
             ]]
           }
         })
@@ -388,13 +388,13 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("Bot Token").setDesc("Telegram bot token \u043E\u0442 BotFather").addText(
+    new import_obsidian.Setting(containerEl).setName("Bot Token").setDesc("Telegram bot token from @BotFather").addText(
       (t) => t.setPlaceholder("1234567890:AAF...").setValue(this.plugin.settings.botToken).onChange(async (v) => {
         this.plugin.settings.botToken = v.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Allowed User ID").setDesc("Telegram user ID \u2014 \u0442\u043E\u043B\u044C\u043A\u043E \u044D\u0442\u043E\u0442 \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C \u043C\u043E\u0436\u0435\u0442 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0442\u044C").addText(
+    new import_obsidian.Setting(containerEl).setName("Allowed User ID").setDesc("Only messages from this Telegram user ID will be processed").addText(
       (t) => t.setPlaceholder("5152249676").setValue(this.plugin.settings.allowedUserId ? String(this.plugin.settings.allowedUserId) : "").onChange(async (v) => {
         const id = parseInt(v.trim());
         if (!isNaN(id)) {
@@ -403,25 +403,25 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Inbox Path").setDesc("\u041F\u0430\u043F\u043A\u0430 \u0432 vault \u0434\u043B\u044F \u0432\u0445\u043E\u0434\u044F\u0449\u0438\u0445 \u0437\u0430\u043C\u0435\u0442\u043E\u043A").addText(
+    new import_obsidian.Setting(containerEl).setName("Inbox Path").setDesc("Vault folder where incoming notes are saved").addText(
       (t) => t.setPlaceholder("inbox").setValue(this.plugin.settings.inboxPath).onChange(async (v) => {
         this.plugin.settings.inboxPath = v.trim() || "inbox";
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Sprint Path").setDesc("\u0424\u0430\u0439\u043B \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0441\u043F\u0440\u0438\u043D\u0442\u0430 (\u0437\u0430\u0434\u0430\u0447\u0438 \u0441 #todo \u2192 \u043A\u043D\u043E\u043F\u043A\u0430 \xAB\u0412 \u0441\u043F\u0440\u0438\u043D\u0442\xBB)").addText(
+    new import_obsidian.Setting(containerEl).setName("Sprint Path").setDesc("File for active sprint tasks (messages with #todo \u2192 'To sprint' button)").addText(
       (t) => t.setPlaceholder("daily.todos.4.md").setValue(this.plugin.settings.sprintPath).onChange(async (v) => {
         this.plugin.settings.sprintPath = v.trim() || "daily.todos.4.md";
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Backlog Path").setDesc("\u0424\u0430\u0439\u043B \u0431\u044D\u043A\u043B\u043E\u0433\u0430 (\u0437\u0430\u0434\u0430\u0447\u0438 \u0441 #todo \u2192 \u043A\u043D\u043E\u043F\u043A\u0430 \xAB\u0412 \u0431\u044D\u043A\u043B\u043E\u0433\xBB)").addText(
+    new import_obsidian.Setting(containerEl).setName("Backlog Path").setDesc("File for backlog tasks (messages with #todo \u2192 'To backlog' button)").addText(
       (t) => t.setPlaceholder("backlog.md").setValue(this.plugin.settings.todosPath).onChange(async (v) => {
         this.plugin.settings.todosPath = v.trim() || "backlog.md";
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Polling Interval (\u0441\u0435\u043A\u0443\u043D\u0434\u044B)").setDesc("\u041A\u0430\u043A \u0447\u0430\u0441\u0442\u043E \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u0442\u044C \u043D\u043E\u0432\u044B\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F (\u043C\u0438\u043D\u0438\u043C\u0443\u043C 5)").addText(
+    new import_obsidian.Setting(containerEl).setName("Polling Interval (seconds)").setDesc("How often to check for new messages (minimum 5)").addText(
       (t) => t.setPlaceholder("30").setValue(String(this.plugin.settings.pollingIntervalSeconds)).onChange(async (v) => {
         const n = parseInt(v.trim());
         if (!isNaN(n) && n >= 5) {
@@ -430,7 +430,7 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Groq API Key").setDesc("\u0414\u043B\u044F \u0440\u0430\u0441\u0448\u0438\u0444\u0440\u043E\u0432\u043A\u0438 \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u044B\u0445 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439. \u041F\u043E\u043B\u0443\u0447\u0438\u0442\u044C: console.groq.com").addText(
+    new import_obsidian.Setting(containerEl).setName("Groq API Key").setDesc("For voice message transcription. Get one at console.groq.com (free tier available)").addText(
       (t) => t.setPlaceholder("gsk_...").setValue(this.plugin.settings.groqApiKey).onChange(async (v) => {
         this.plugin.settings.groqApiKey = v.trim();
         await this.plugin.saveSettings();

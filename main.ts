@@ -162,8 +162,8 @@ export default class TelegramInboxPlugin extends Plugin {
     }
 
     if (msg.text === "/status") {
-      const last = this.settings.lastSavedFile || "нет";
-      await this.sendMessage(msg.from.id, `✅ Плагин работает.\nПоследнее сохранение: ${last}`);
+      const last = this.settings.lastSavedFile || "none";
+      await this.sendMessage(msg.from.id, `✅ Plugin is running.\nLast saved: ${last}`);
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -175,7 +175,7 @@ export default class TelegramInboxPlugin extends Plugin {
     }
 
     if (!msg.text) {
-      await this.sendMessage(msg.from.id, "⚠️ Пока поддерживается только текст и голосовые.");
+      await this.sendMessage(msg.from.id, "⚠️ Only text and voice messages are supported.");
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -210,7 +210,7 @@ export default class TelegramInboxPlugin extends Plugin {
     const targetPath = dest === "sprint"
       ? (this.settings.sprintPath || "daily.todos.4.md")
       : (this.settings.todosPath || "backlog.md");
-    const label = dest === "sprint" ? "спринт" : "бэклог";
+    const label = dest === "sprint" ? "sprint" : "backlog";
 
     await this.appendTodos(tasks, targetPath, cq.from.id, label);
   }
@@ -219,17 +219,17 @@ export default class TelegramInboxPlugin extends Plugin {
     if (!msg.voice || !msg.from) return;
 
     if (!this.settings.groqApiKey) {
-      await this.sendMessage(msg.from.id, "⚠️ Groq API key не указан. Добавь его в настройках плагина.");
+      await this.sendMessage(msg.from.id, "⚠️ Groq API key is not set. Add it in plugin settings.");
       this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
     }
 
-    await this.sendMessage(msg.from.id, "⏳ Расшифровываю голосовое...");
+    await this.sendMessage(msg.from.id, "⏳ Transcribing voice message...");
 
     const text = await this.transcribeVoice(msg.voice.file_id);
     if (!text) {
-      await this.sendMessage(msg.from.id, "❌ Не удалось расшифровать. Проверь Groq API key.");
+      await this.sendMessage(msg.from.id, "❌ Transcription failed. Check your Groq API key.");
       this.settings.lastUpdateId = updateId;
       await this.saveData(this.settings);
       return;
@@ -296,11 +296,11 @@ export default class TelegramInboxPlugin extends Plugin {
       await this.app.vault.create(path, content);
       this.settings.lastSavedFile = filename;
       new Notice(`✅ ${filename}`);
-      await this.sendMessage(chatId, `✅ Сохранено: ${filename}`);
+      await this.sendMessage(chatId, `✅ Saved: ${filename}`);
       return true;
     } catch (e) {
       console.error("TelegramInbox create error:", path, e);
-      new Notice(`❌ Ошибка: ${filename}`);
+      new Notice(`❌ Error: ${filename}`);
       return false;
     }
   }
@@ -334,7 +334,7 @@ export default class TelegramInboxPlugin extends Plugin {
 
     await this.sendMessageWithButtons(
       chatId,
-      `📋 Куда добавить?\n\n${preview}`,
+      `📋 Where to add?\n\n${preview}`,
       msgId,
     );
     return true;
@@ -355,11 +355,11 @@ export default class TelegramInboxPlugin extends Plugin {
       }
       const firstTask = lines.find(l => l.startsWith("- [ ]"))?.slice(6) ?? lines[0];
       new Notice(`✅ ${label}: ${firstTask.slice(0, 40)}`);
-      await this.sendMessage(chatId, `✅ Добавлено в ${label}`);
+      await this.sendMessage(chatId, `✅ Added to ${label}`);
     } catch (e) {
       console.error("TelegramInbox appendTodos error:", filePath, e);
-      new Notice("❌ Ошибка сохранения задачи");
-      await this.sendMessage(chatId, "❌ Не удалось сохранить задачу");
+      new Notice("❌ Failed to save task");
+      await this.sendMessage(chatId, "❌ Failed to save task");
     }
   }
 
@@ -397,8 +397,8 @@ export default class TelegramInboxPlugin extends Plugin {
           text,
           reply_markup: {
             inline_keyboard: [[
-              { text: "📋 В спринт", callback_data: `sprint:${msgId}` },
-              { text: "📦 В бэклог", callback_data: `backlog:${msgId}` },
+              { text: "📋 To sprint", callback_data: `sprint:${msgId}` },
+              { text: "📦 To backlog", callback_data: `backlog:${msgId}` },
             ]],
           },
         }),
@@ -446,7 +446,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Bot Token")
-      .setDesc("Telegram bot token от BotFather")
+      .setDesc("Telegram bot token from @BotFather")
       .addText((t) =>
         t.setPlaceholder("1234567890:AAF...")
           .setValue(this.plugin.settings.botToken)
@@ -458,7 +458,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Allowed User ID")
-      .setDesc("Telegram user ID — только этот пользователь может сохранять")
+      .setDesc("Only messages from this Telegram user ID will be processed")
       .addText((t) =>
         t.setPlaceholder("5152249676")
           .setValue(this.plugin.settings.allowedUserId ? String(this.plugin.settings.allowedUserId) : "")
@@ -473,7 +473,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Inbox Path")
-      .setDesc("Папка в vault для входящих заметок")
+      .setDesc("Vault folder where incoming notes are saved")
       .addText((t) =>
         t.setPlaceholder("inbox")
           .setValue(this.plugin.settings.inboxPath)
@@ -485,7 +485,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sprint Path")
-      .setDesc("Файл активного спринта (задачи с #todo → кнопка «В спринт»)")
+      .setDesc("File for active sprint tasks (messages with #todo → 'To sprint' button)")
       .addText((t) =>
         t.setPlaceholder("daily.todos.4.md")
           .setValue(this.plugin.settings.sprintPath)
@@ -497,7 +497,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Backlog Path")
-      .setDesc("Файл бэклога (задачи с #todo → кнопка «В бэклог»)")
+      .setDesc("File for backlog tasks (messages with #todo → 'To backlog' button)")
       .addText((t) =>
         t.setPlaceholder("backlog.md")
           .setValue(this.plugin.settings.todosPath)
@@ -508,8 +508,8 @@ class TelegramInboxSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Polling Interval (секунды)")
-      .setDesc("Как часто проверять новые сообщения (минимум 5)")
+      .setName("Polling Interval (seconds)")
+      .setDesc("How often to check for new messages (minimum 5)")
       .addText((t) =>
         t.setPlaceholder("30")
           .setValue(String(this.plugin.settings.pollingIntervalSeconds))
@@ -524,7 +524,7 @@ class TelegramInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Groq API Key")
-      .setDesc("Для расшифровки голосовых сообщений. Получить: console.groq.com")
+      .setDesc("For voice message transcription. Get one at console.groq.com (free tier available)")
       .addText((t) =>
         t.setPlaceholder("gsk_...")
           .setValue(this.plugin.settings.groqApiKey)

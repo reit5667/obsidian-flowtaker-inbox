@@ -1,99 +1,126 @@
-# Flowtaker Inbox — Obsidian Plugin
+# Flowtaker Inbox
 
-Send messages from Telegram to your Obsidian vault inbox — no server required.
+Send messages from Telegram to your Obsidian vault — no server required.
 
-Text yourself in Telegram → `.md` file appears in your `inbox/` folder → syncs to iPhone via iCloud.
+The bot runs directly inside Obsidian. Text yourself a note, tag a task, or send a voice message — it lands in your vault within seconds.
 
-The bot runs directly inside Obsidian (desktop polling). Tags in your message are extracted as frontmatter. Voice messages are transcribed via Groq API.
-
----
-
-*README на русском ниже / Russian README below*
-
----
-
-Obsidian-плагин для автоматического захвата Telegram-сообщений в vault.
-
-Отправляешь текст себе в Telegram → файл `.md` появляется в `inbox/` твоего vault → через iCloud синхронизируется на iPhone.
-
-## Как работает
+## How it works
 
 ```
-Telegram (iPhone / любое устройство)
-        ↓
-Obsidian-плагин на Mac (polling каждые 30 сек)
-        ↓
-vault/inbox/DDMMYYYY_HHMMSS.md
-        ↓
-iCloud → iPhone
+You → Telegram bot → Obsidian plugin (polling) → vault/inbox/note.md
 ```
 
-Никаких серверов. Бот работает прямо внутри Obsidian.
+The plugin polls Telegram every 30 seconds. Files are created locally in your vault folder, so iCloud, Obsidian Sync, or any other sync solution picks them up automatically.
 
-## Установка
+## Features
 
-### 1. Создать Telegram-бота
+- **Text notes** — any message is saved as a `.md` file with YAML frontmatter
+- **Tags** — `#tag` in your message becomes `tags: [tag]` in frontmatter and is stripped from the body
+- **Forwarded messages** — source is recorded in `forwarded_from` frontmatter field
+- **Tasks** (`#todo`) — bot asks where to route them: sprint or backlog, then appends as `- [ ] task`
+- **Voice transcription** — voice messages are transcribed via Groq Whisper and saved as notes
+- `/status` — bot replies with the last saved filename
 
-1. Открыть [@BotFather](https://t.me/BotFather) в Telegram
-2. Отправить `/newbot` → задать имя и username
-3. Скопировать **Bot Token** (формат `1234567890:AAF...`)
+## Note format
 
-### 2. Узнать свой Telegram User ID
+Filename: `DDMMYYYY_HHMMSS.md`
 
-Написать боту [@userinfobot](https://t.me/userinfobot) — он ответит твоим ID.
+```markdown
+---
+created: 2026-07-04T15:30:00
+source: telegram
+type: text
+tags: [idea, work]
+---
 
-### 3. Установить плагин вручную
+Your message text here
+```
 
+## Setup
+
+### 1. Create a Telegram bot
+
+1. Open [@BotFather](https://t.me/BotFather)
+2. Send `/newbot` → set a name and username
+3. Copy the **Bot Token** (`1234567890:AAF...`)
+
+### 2. Get your Telegram User ID
+
+Message [@userinfobot](https://t.me/userinfobot) — it replies with your numeric ID.
+
+### 3. Install the plugin
+
+**From Obsidian (after community approval):**
+Settings → Community plugins → Search "Flowtaker Inbox" → Install
+
+**Manual install:**
 ```bash
-# Путь к vault на Mac (стандартный iCloud-путь)
-VAULT=~/Library/Mobile\ Documents/iCloud~md~obsidian/Documents/Obsidian\ Vault
-
+VAULT="$HOME/path/to/your/vault"
 mkdir -p "$VAULT/.obsidian/plugins/flowtaker-inbox"
 cp main.js manifest.json "$VAULT/.obsidian/plugins/flowtaker-inbox/"
 ```
 
-### 4. Включить плагин в Obsidian
+Then: Settings → Community plugins → enable "Flowtaker Inbox"
 
-1. Obsidian → Settings → Community plugins → Enable community plugins
-2. Найти **Flowtaker Inbox** → включить
-3. Перейти в настройки плагина → ввести Bot Token и User ID
+### 4. Configure
 
-## Формат заметок
+Open Settings → Flowtaker Inbox:
+- Paste your **Bot Token**
+- Enter your **Allowed User ID**
+- Adjust paths if needed (defaults work for most setups)
 
-Имя файла: `DDMMYYYY_HHMMSS.md` (московское время UTC+3)
+## Settings
 
-```markdown
----
-created: 2026-05-16T10:00:00
-source: telegram
-forwarded_from: Имя (если пересланное)
----
+| Setting | Description | Default |
+|---|---|---|
+| Bot Token | Token from @BotFather | — |
+| Allowed User ID | Only this user's messages are processed | — |
+| Inbox Path | Folder for incoming notes | `inbox` |
+| Sprint Path | File for tasks routed to sprint | `daily.todos.4.md` |
+| Backlog Path | File for tasks routed to backlog | `backlog.md` |
+| Polling Interval | How often to check for messages (seconds, min 5) | `30` |
+| Groq API Key | For voice transcription. Get one at [console.groq.com](https://console.groq.com) | — |
 
-Текст сообщения
+## Tasks workflow
+
+Send a message with `#todo`:
+
+```
+Buy oat milk #todo
+Write blog post #todo
 ```
 
-## Настройки
+The bot replies with inline buttons: **📋 To sprint** / **📦 To backlog**.  
+Tap one — tasks are appended as `- [ ] ...` to the configured file.
 
-| Параметр | Описание | По умолчанию |
-|---|---|---|
-| Bot Token | Токен от BotFather | — |
-| Allowed User ID | Только этот пользователь может сохранять | — |
-| Inbox Path | Папка в vault для входящих | `inbox` |
-| Polling Interval | Как часто проверять сообщения (сек, мин 5) | `30` |
+Use `#todos` to add a context line (plain text, not a checkbox):
 
-## iPhone
+```
+Project planning session #todos
+Define MVP scope #todo
+Write tech spec #todo
+```
 
-Плагин работает только на Mac (desktop). На iPhone заметки появляются автоматически через iCloud синхронизацию.
+## Voice transcription
+
+Requires a [Groq API key](https://console.groq.com) (free tier available).
+
+Send a voice message → plugin downloads and transcribes it via `whisper-large-v3-turbo` → saves to inbox with `type: voice` in frontmatter.
 
 ## Troubleshooting
 
-**Сообщения не сохраняются**
-- Проверь Bot Token и User ID в настройках плагина
-- Убедись что пишешь именно своему боту (не в чужой)
+**Messages not appearing**
+- Check Bot Token and User ID in plugin settings
+- Make sure you're writing to your own bot
+- Open Obsidian console (Ctrl+Shift+I → Console) for errors
 
-**Ошибка в Notice (красный крестик)**
-- Возможно файл с таким именем уже существует (крайне редко)
-- Проверь консоль Obsidian: Ctrl+Shift+I → Console
+**Plugin stops after Obsidian restart**
+- Normal behavior — `lastUpdateId` is saved in `data.json`, no messages will be duplicated on restart
 
-**Плагин не видит новые сообщения после перезапуска Obsidian**
-- Это нормально: `lastUpdateId` сохранён в `data.json`, дублей не будет
+**Voice not transcribing**
+- Add Groq API key in settings
+- Voice messages must be under Telegram's file size limit (~20 MB)
+
+## License
+
+MIT

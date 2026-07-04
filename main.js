@@ -27,7 +27,8 @@ var DEFAULTS = {
   botToken: "",
   allowedUserId: 0,
   inboxPath: "inbox",
-  todosPath: "todos.md",
+  todosPath: "backlog.md",
+  sprintPath: "daily.todos.4.md",
   pollingIntervalSeconds: 30,
   lastUpdateId: 0,
   groqApiKey: "",
@@ -65,6 +66,9 @@ function extractTags(text) {
   const matches = (_a = text.match(/#[\wа-яёА-ЯЁ]+/gu)) != null ? _a : [];
   return matches.map((t) => t.slice(1));
 }
+function stripTags(text) {
+  return text.replace(/#[\wа-яёА-ЯЁ]+/gu, "").replace(/[ \t]+\n/g, "\n").trim();
+}
 function buildContent(text, utcSec, forwardedFrom, tags, type) {
   let fm = `---
 created: ${buildIso(utcSec)}
@@ -77,9 +81,13 @@ forwarded_from: ${forwardedFrom}`;
     fm += `
 tags: [${tags.join(", ")}]`;
   fm += "\n---\n\n";
-  return fm + text;
+  return fm + stripTags(text);
 }
 var TelegramInboxPlugin = class extends import_obsidian.Plugin {
+  constructor() {
+    super(...arguments);
+    this.pendingTasks = /* @__PURE__ */ new Map();
+  }
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new TelegramInboxSettingTab(this.app, this));
@@ -108,6 +116,10 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
   }
   async handleUpdate(update) {
     var _a;
+    if (update.callback_query) {
+      await this.handleCallbackQuery(update.callback_query, update.update_id);
+      return;
+    }
     const msg = update.message;
     if (!msg || ((_a = msg.from) == null ? void 0 : _a.id) !== this.settings.allowedUserId) {
       this.settings.lastUpdateId = update.update_id;
@@ -134,11 +146,28 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
     }
     const tags = extractTags(msg.text);
     const hasTodoTag = tags.includes("todo") || tags.includes("todos");
-    const saved = hasTodoTag ? await this.processTodosMessage(msg.text, msg.from.id) : await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
+    const saved = hasTodoTag ? await this.processTodosMessage(msg.text, msg.message_id, msg.from.id) : await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
     if (saved) {
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
     }
+  }
+  async handleCallbackQuery(cq, updateId) {
+    var _a;
+    await this.answerCallbackQuery(cq.id);
+    const data = (_a = cq.data) != null ? _a : "";
+    const colonIdx = data.indexOf(":");
+    const dest = data.slice(0, colonIdx);
+    const msgId = parseInt(data.slice(colonIdx + 1));
+    const tasks = this.pendingTasks.get(msgId);
+    this.settings.lastUpdateId = updateId;
+    await this.saveData(this.settings);
+    if (!tasks || !["sprint", "backlog"].includes(dest))
+      return;
+    this.pendingTasks.delete(msgId);
+    const targetPath = dest === "sprint" ? this.settings.sprintPath || "daily.todos.4.md" : this.settings.todosPath || "backlog.md";
+    const label = dest === "sprint" ? "\u0441\u043F\u0440\u0438\u043D\u0442" : "\u0431\u044D\u043A\u043B\u043E\u0433";
+    await this.appendTodos(tasks, targetPath, cq.from.id, label);
   }
   async handleVoice(msg, updateId) {
     if (!msg.voice || !msg.from)
@@ -231,8 +260,7 @@ Content-Type: audio/ogg\r
       return false;
     }
   }
-  async processTodosMessage(text, chatId) {
-    const todoPath = this.settings.todosPath || "todos.md";
+  async processTodosMessage(text, msgId, chatId) {
     const lines = [];
     const taskTexts = [];
     for (const raw of text.split("\n")) {
@@ -256,32 +284,39 @@ Content-Type: audio/ogg\r
     }
     if (!lines.length)
       return true;
+    this.pendingTasks.set(msgId, lines);
+    const preview = taskTexts.length ? taskTexts.map((t) => `\u2022 ${t.length > 50 ? t.slice(0, 50) + "\u2026" : t}`).join("\n") : lines[0];
+    await this.sendMessageWithButtons(
+      chatId,
+      `\u{1F4CB} \u041A\u0443\u0434\u0430 \u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C?
+
+${preview}`,
+      msgId
+    );
+    return true;
+  }
+  async appendTodos(lines, filePath, chatId, label) {
+    var _a, _b;
     try {
-      const folder = todoPath.includes("/") ? todoPath.slice(0, todoPath.lastIndexOf("/")) : "";
+      const folder = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
       if (folder)
         await this.ensureFolder(folder);
-      const existing = this.app.vault.getAbstractFileByPath(todoPath);
+      const existing = this.app.vault.getAbstractFileByPath(filePath);
       const entry = lines.join("\n") + "\n";
       if (existing instanceof import_obsidian.TFile) {
         const content = await this.app.vault.read(existing);
         const separator = content.endsWith("\n") ? "" : "\n";
         await this.app.vault.modify(existing, content + separator + entry);
       } else {
-        await this.app.vault.create(todoPath, entry);
+        await this.app.vault.create(filePath, entry);
       }
-      if (taskTexts.length) {
-        const preview = taskTexts.map((t) => `\xAB${t.length > 60 ? t.slice(0, 60) + "\u2026" : t}\xBB`).join(", ");
-        new import_obsidian.Notice(`\u2705 Todo: ${taskTexts[0].slice(0, 50)}`);
-        await this.sendMessage(chatId, `\u2705 \u0417\u0430\u0434\u0430\u0447\u0430: ${preview}`);
-      } else {
-        new import_obsidian.Notice("\u2705 \u041A\u043E\u043D\u0442\u0435\u043A\u0441\u0442 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D");
-        await this.sendMessage(chatId, "\u2705 \u041A\u043E\u043D\u0442\u0435\u043A\u0441\u0442 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D");
-      }
-      return true;
+      const firstTask = (_b = (_a = lines.find((l) => l.startsWith("- [ ]"))) == null ? void 0 : _a.slice(6)) != null ? _b : lines[0];
+      new import_obsidian.Notice(`\u2705 ${label}: ${firstTask.slice(0, 40)}`);
+      await this.sendMessage(chatId, `\u2705 \u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 ${label}`);
     } catch (e) {
-      console.error("TelegramInbox todo error:", todoPath, e);
+      console.error("TelegramInbox appendTodos error:", filePath, e);
       new import_obsidian.Notice("\u274C \u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u0437\u0430\u0434\u0430\u0447\u0438");
-      return false;
+      await this.sendMessage(chatId, "\u274C \u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u0437\u0430\u0434\u0430\u0447\u0443");
     }
   }
   async ensureFolder(path) {
@@ -303,6 +338,39 @@ Content-Type: audio/ogg\r
       });
     } catch (e) {
       console.error("TelegramInbox sendMessage error:", e);
+    }
+  }
+  async sendMessageWithButtons(chatId, text, msgId) {
+    try {
+      await (0, import_obsidian.requestUrl)({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/sendMessage`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "\u{1F4CB} \u0412 \u0441\u043F\u0440\u0438\u043D\u0442", callback_data: `sprint:${msgId}` },
+              { text: "\u{1F4E6} \u0412 \u0431\u044D\u043A\u043B\u043E\u0433", callback_data: `backlog:${msgId}` }
+            ]]
+          }
+        })
+      });
+    } catch (e) {
+      console.error("TelegramInbox sendMessageWithButtons error:", e);
+    }
+  }
+  async answerCallbackQuery(callbackQueryId) {
+    try {
+      await (0, import_obsidian.requestUrl)({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/answerCallbackQuery`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_query_id: callbackQueryId })
+      });
+    } catch (e) {
+      console.error("TelegramInbox answerCallbackQuery error:", e);
     }
   }
   async loadSettings() {
@@ -341,9 +409,15 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Todos Path").setDesc("\u0424\u0430\u0439\u043B \u0434\u043B\u044F \u0437\u0430\u0434\u0430\u0447 (\u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F \u0441 \u0442\u0435\u0433\u043E\u043C #todo)").addText(
-      (t) => t.setPlaceholder("todos.md").setValue(this.plugin.settings.todosPath).onChange(async (v) => {
-        this.plugin.settings.todosPath = v.trim() || "todos.md";
+    new import_obsidian.Setting(containerEl).setName("Sprint Path").setDesc("\u0424\u0430\u0439\u043B \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0441\u043F\u0440\u0438\u043D\u0442\u0430 (\u0437\u0430\u0434\u0430\u0447\u0438 \u0441 #todo \u2192 \u043A\u043D\u043E\u043F\u043A\u0430 \xAB\u0412 \u0441\u043F\u0440\u0438\u043D\u0442\xBB)").addText(
+      (t) => t.setPlaceholder("daily.todos.4.md").setValue(this.plugin.settings.sprintPath).onChange(async (v) => {
+        this.plugin.settings.sprintPath = v.trim() || "daily.todos.4.md";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Backlog Path").setDesc("\u0424\u0430\u0439\u043B \u0431\u044D\u043A\u043B\u043E\u0433\u0430 (\u0437\u0430\u0434\u0430\u0447\u0438 \u0441 #todo \u2192 \u043A\u043D\u043E\u043F\u043A\u0430 \xAB\u0412 \u0431\u044D\u043A\u043B\u043E\u0433\xBB)").addText(
+      (t) => t.setPlaceholder("backlog.md").setValue(this.plugin.settings.todosPath).onChange(async (v) => {
+        this.plugin.settings.todosPath = v.trim() || "backlog.md";
         await this.plugin.saveSettings();
       })
     );

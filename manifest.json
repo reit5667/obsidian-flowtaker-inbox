@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
   "description": "Save Telegram messages directly to Obsidian vault inbox",
-  "author": "vsharavin",
-  "isDesktopOnly": false
+  "author": "Vadim Sharavin",
+  "authorUrl": "https://github.com/reit5667",
+  "isDesktopOnly": true
 }

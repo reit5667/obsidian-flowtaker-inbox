@@ -5,6 +5,7 @@ interface Settings {
   allowedUserId: number;
   inboxPath: string;
   todosPath: string;
+  sprintPath: string;
   pollingIntervalSeconds: number;
   lastUpdateId: number;
   groqApiKey: string;
@@ -15,7 +16,8 @@ const DEFAULTS: Settings = {
   botToken: "",
   allowedUserId: 0,
   inboxPath: "inbox",
-  todosPath: "todos.md",
+  todosPath: "backlog.md",
+  sprintPath: "daily.todos.4.md",
   pollingIntervalSeconds: 30,
   lastUpdateId: 0,
   groqApiKey: "",
@@ -54,9 +56,17 @@ interface TgMessage {
   forward_from_chat?: { title: string };
 }
 
+interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  message?: TgMessage;
+  data?: string;
+}
+
 interface TgUpdate {
   update_id: number;
   message?: TgMessage;
+  callback_query?: TgCallbackQuery;
 }
 
 // --- Helpers ---
@@ -92,18 +102,23 @@ function extractTags(text: string): string[] {
   return matches.map((t) => t.slice(1));
 }
 
+function stripTags(text: string): string {
+  return text.replace(/#[\wа-яёА-ЯЁ]+/gu, "").replace(/[ \t]+\n/g, "\n").trim();
+}
+
 function buildContent(text: string, utcSec: number, forwardedFrom: string | null, tags: string[], type: "text" | "voice"): string {
   let fm = `---\ncreated: ${buildIso(utcSec)}\nsource: telegram\ntype: ${type}`;
   if (forwardedFrom) fm += `\nforwarded_from: ${forwardedFrom}`;
   if (tags.length) fm += `\ntags: [${tags.join(", ")}]`;
   fm += "\n---\n\n";
-  return fm + text;
+  return fm + stripTags(text);
 }
 
 // --- Plugin ---
 
 export default class TelegramInboxPlugin extends Plugin {
   settings: Settings;
+  private pendingTasks = new Map<number, string[]>();
 
   async onload() {
     await this.loadSettings();
@@ -114,7 +129,6 @@ export default class TelegramInboxPlugin extends Plugin {
   startPolling() {
     const ms = Math.max(5, this.settings.pollingIntervalSeconds) * 1000;
     this.registerInterval(window.setInterval(() => this.poll(), ms));
-    // delay first poll to let vault finish loading
     setTimeout(() => this.poll(), 3000);
   }
 
@@ -134,6 +148,11 @@ export default class TelegramInboxPlugin extends Plugin {
   }
 
   async handleUpdate(update: TgUpdate) {
+    if (update.callback_query) {
+      await this.handleCallbackQuery(update.callback_query, update.update_id);
+      return;
+    }
+
     const msg = update.message;
 
     if (!msg || msg.from?.id !== this.settings.allowedUserId) {
@@ -142,7 +161,6 @@ export default class TelegramInboxPlugin extends Plugin {
       return;
     }
 
-    // /status command
     if (msg.text === "/status") {
       const last = this.settings.lastSavedFile || "нет";
       await this.sendMessage(msg.from.id, `✅ Плагин работает.\nПоследнее сохранение: ${last}`);
@@ -151,13 +169,11 @@ export default class TelegramInboxPlugin extends Plugin {
       return;
     }
 
-    // voice message
     if (msg.voice) {
       await this.handleVoice(msg, update.update_id);
       return;
     }
 
-    // unsupported type
     if (!msg.text) {
       await this.sendMessage(msg.from.id, "⚠️ Пока поддерживается только текст и голосовые.");
       this.settings.lastUpdateId = update.update_id;
@@ -165,16 +181,38 @@ export default class TelegramInboxPlugin extends Plugin {
       return;
     }
 
-    // text message
     const tags = extractTags(msg.text);
     const hasTodoTag = tags.includes("todo") || tags.includes("todos");
     const saved = hasTodoTag
-      ? await this.processTodosMessage(msg.text, msg.from.id)
+      ? await this.processTodosMessage(msg.text, msg.message_id, msg.from.id)
       : await this.saveNote(msg.text, msg.date, getForwardedFrom(msg), tags, msg.from.id, "text");
     if (saved) {
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
     }
+  }
+
+  async handleCallbackQuery(cq: TgCallbackQuery, updateId: number) {
+    await this.answerCallbackQuery(cq.id);
+
+    const data = cq.data ?? "";
+    const colonIdx = data.indexOf(":");
+    const dest = data.slice(0, colonIdx);
+    const msgId = parseInt(data.slice(colonIdx + 1));
+
+    const tasks = this.pendingTasks.get(msgId);
+    this.settings.lastUpdateId = updateId;
+    await this.saveData(this.settings);
+
+    if (!tasks || !["sprint", "backlog"].includes(dest)) return;
+
+    this.pendingTasks.delete(msgId);
+    const targetPath = dest === "sprint"
+      ? (this.settings.sprintPath || "daily.todos.4.md")
+      : (this.settings.todosPath || "backlog.md");
+    const label = dest === "sprint" ? "спринт" : "бэклог";
+
+    await this.appendTodos(tasks, targetPath, cq.from.id, label);
   }
 
   async handleVoice(msg: TgMessage, updateId: number) {
@@ -207,19 +245,16 @@ export default class TelegramInboxPlugin extends Plugin {
 
   async transcribeVoice(fileId: string): Promise<string | null> {
     try {
-      // get file path from Telegram
       const fileRes = await requestUrl({
         url: `https://api.telegram.org/bot${this.settings.botToken}/getFile?file_id=${fileId}`,
       });
       const filePath: string = fileRes.json?.result?.file_path;
       if (!filePath) return null;
 
-      // download audio binary
       const audioRes = await requestUrl({
         url: `https://api.telegram.org/file/bot${this.settings.botToken}/${filePath}`,
       });
 
-      // build multipart/form-data manually
       const boundary = "----FlowBoundary" + Math.random().toString(36).slice(2);
       const enc = new TextEncoder();
       const preamble = enc.encode(
@@ -270,8 +305,7 @@ export default class TelegramInboxPlugin extends Plugin {
     }
   }
 
-  async processTodosMessage(text: string, chatId: number): Promise<boolean> {
-    const todoPath = this.settings.todosPath || "todos.md";
+  async processTodosMessage(text: string, msgId: number, chatId: number): Promise<boolean> {
     const lines: string[] = [];
     const taskTexts: string[] = [];
 
@@ -292,32 +326,40 @@ export default class TelegramInboxPlugin extends Plugin {
 
     if (!lines.length) return true;
 
+    this.pendingTasks.set(msgId, lines);
+
+    const preview = taskTexts.length
+      ? taskTexts.map(t => `• ${t.length > 50 ? t.slice(0, 50) + "…" : t}`).join("\n")
+      : lines[0];
+
+    await this.sendMessageWithButtons(
+      chatId,
+      `📋 Куда добавить?\n\n${preview}`,
+      msgId,
+    );
+    return true;
+  }
+
+  async appendTodos(lines: string[], filePath: string, chatId: number, label: string): Promise<void> {
     try {
-      const folder = todoPath.includes("/") ? todoPath.slice(0, todoPath.lastIndexOf("/")) : "";
+      const folder = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
       if (folder) await this.ensureFolder(folder);
-      const existing = this.app.vault.getAbstractFileByPath(todoPath);
+      const existing = this.app.vault.getAbstractFileByPath(filePath);
       const entry = lines.join("\n") + "\n";
       if (existing instanceof TFile) {
         const content = await this.app.vault.read(existing);
         const separator = content.endsWith("\n") ? "" : "\n";
         await this.app.vault.modify(existing, content + separator + entry);
       } else {
-        await this.app.vault.create(todoPath, entry);
+        await this.app.vault.create(filePath, entry);
       }
-
-      if (taskTexts.length) {
-        const preview = taskTexts.map(t => `«${t.length > 60 ? t.slice(0, 60) + "…" : t}»`).join(", ");
-        new Notice(`✅ Todo: ${taskTexts[0].slice(0, 50)}`);
-        await this.sendMessage(chatId, `✅ Задача: ${preview}`);
-      } else {
-        new Notice("✅ Контекст добавлен");
-        await this.sendMessage(chatId, "✅ Контекст добавлен");
-      }
-      return true;
+      const firstTask = lines.find(l => l.startsWith("- [ ]"))?.slice(6) ?? lines[0];
+      new Notice(`✅ ${label}: ${firstTask.slice(0, 40)}`);
+      await this.sendMessage(chatId, `✅ Добавлено в ${label}`);
     } catch (e) {
-      console.error("TelegramInbox todo error:", todoPath, e);
+      console.error("TelegramInbox appendTodos error:", filePath, e);
       new Notice("❌ Ошибка сохранения задачи");
-      return false;
+      await this.sendMessage(chatId, "❌ Не удалось сохранить задачу");
     }
   }
 
@@ -341,6 +383,41 @@ export default class TelegramInboxPlugin extends Plugin {
       });
     } catch (e) {
       console.error("TelegramInbox sendMessage error:", e);
+    }
+  }
+
+  async sendMessageWithButtons(chatId: number, text: string, msgId: number) {
+    try {
+      await requestUrl({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/sendMessage`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "📋 В спринт", callback_data: `sprint:${msgId}` },
+              { text: "📦 В бэклог", callback_data: `backlog:${msgId}` },
+            ]],
+          },
+        }),
+      });
+    } catch (e) {
+      console.error("TelegramInbox sendMessageWithButtons error:", e);
+    }
+  }
+
+  async answerCallbackQuery(callbackQueryId: string) {
+    try {
+      await requestUrl({
+        url: `https://api.telegram.org/bot${this.settings.botToken}/answerCallbackQuery`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_query_id: callbackQueryId }),
+      });
+    } catch (e) {
+      console.error("TelegramInbox answerCallbackQuery error:", e);
     }
   }
 
@@ -407,13 +484,25 @@ class TelegramInboxSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Todos Path")
-      .setDesc("Файл для задач (сообщения с тегом #todo)")
+      .setName("Sprint Path")
+      .setDesc("Файл активного спринта (задачи с #todo → кнопка «В спринт»)")
       .addText((t) =>
-        t.setPlaceholder("todos.md")
+        t.setPlaceholder("daily.todos.4.md")
+          .setValue(this.plugin.settings.sprintPath)
+          .onChange(async (v) => {
+            this.plugin.settings.sprintPath = v.trim() || "daily.todos.4.md";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Backlog Path")
+      .setDesc("Файл бэклога (задачи с #todo → кнопка «В бэклог»)")
+      .addText((t) =>
+        t.setPlaceholder("backlog.md")
           .setValue(this.plugin.settings.todosPath)
           .onChange(async (v) => {
-            this.plugin.settings.todosPath = v.trim() || "todos.md";
+            this.plugin.settings.todosPath = v.trim() || "backlog.md";
             await this.plugin.saveSettings();
           })
       );

@@ -1,5 +1,17 @@
 # Flowtaker Inbox — Obsidian Plugin
 
+Send messages from Telegram to your Obsidian vault inbox — no server required.
+
+Text yourself in Telegram → `.md` file appears in your `inbox/` folder → syncs to iPhone via iCloud.
+
+The bot runs directly inside Obsidian (desktop polling). Tags in your message are extracted as frontmatter. Voice messages are transcribed via Groq API.
+
+---
+
+*README на русском ниже / Russian README below*
+
+---
+
 Obsidian-плагин для автоматического захвата Telegram-сообщений в vault.
 
 Отправляешь текст себе в Telegram → файл `.md` появляется в `inbox/` твоего vault → через iCloud синхронизируется на iPhone.

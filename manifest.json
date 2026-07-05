@@ -1,9 +1,9 @@
 {
   "id": "flowtaker-inbox",
   "name": "Flowtaker Inbox",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "0.15.0",
-  "description": "Save Telegram messages directly to your Obsidian vault inbox. No server required.",
+  "description": "Save Telegram messages directly to your vault inbox. No server required.",
   "author": "Vadim Sharavin",
   "authorUrl": "https://github.com/reit5667",
   "isDesktopOnly": true

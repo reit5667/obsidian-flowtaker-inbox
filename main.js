@@ -32,15 +32,19 @@ var DEFAULTS = {
   pollingIntervalSeconds: 30,
   lastUpdateId: 0,
   groqApiKey: "",
-  lastSavedFile: ""
+  lastSavedFile: "",
+  autoRouteToSprint: false,
+  pendingTasks: {}
 };
 function buildFilename(utcSec) {
-  const d = new Date((utcSec + 3 * 3600) * 1e3);
+  const d = new Date(utcSec * 1e3);
   const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getUTCDate())}${p(d.getUTCMonth() + 1)}${d.getUTCFullYear()}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}.md`;
+  return `${p(d.getDate())}${p(d.getMonth() + 1)}${d.getFullYear()}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.md`;
 }
 function buildIso(utcSec) {
-  return new Date((utcSec + 3 * 3600) * 1e3).toISOString().slice(0, 19);
+  const d = new Date(utcSec * 1e3);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 function getForwardedFrom(msg) {
   var _a, _b, _c, _d;
@@ -86,7 +90,7 @@ tags: [${tags.join(", ")}]`;
 var TelegramInboxPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
-    this.pendingTasks = /* @__PURE__ */ new Map();
+    this.isPolling = false;
   }
   async onload() {
     await this.loadSettings();
@@ -101,8 +105,12 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
   async poll() {
     if (!this.settings.botToken || !this.settings.allowedUserId)
       return;
+    if (this.isPolling)
+      return;
+    this.isPolling = true;
     try {
-      const url = `https://api.telegram.org/bot${this.settings.botToken}/getUpdates?offset=${this.settings.lastUpdateId + 1}&timeout=5&limit=100`;
+      const allowedUpdates = encodeURIComponent(JSON.stringify(["message", "callback_query"]));
+      const url = `https://api.telegram.org/bot${this.settings.botToken}/getUpdates?offset=${this.settings.lastUpdateId + 1}&timeout=5&limit=100&allowed_updates=${allowedUpdates}`;
       const res = await (0, import_obsidian.requestUrl)({ url });
       const data = res.json;
       if (!data.ok || !data.result.length)
@@ -112,10 +120,12 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       }
     } catch (e) {
       console.error("TelegramInbox poll error:", e);
+    } finally {
+      this.isPolling = false;
     }
   }
   async handleUpdate(update) {
-    var _a;
+    var _a, _b;
     if (update.callback_query) {
       await this.handleCallbackQuery(update.callback_query, update.update_id);
       return;
@@ -130,6 +140,21 @@ var TelegramInboxPlugin = class extends import_obsidian.Plugin {
       const last = this.settings.lastSavedFile || "none";
       await this.sendMessage(msg.from.id, `\u2705 Plugin is running.
 Last saved: ${last}`);
+      this.settings.lastUpdateId = update.update_id;
+      await this.saveData(this.settings);
+      return;
+    }
+    if (msg.text === "/start" || msg.text === "/help") {
+      await this.sendMessage(
+        msg.from.id,
+        "\u{1F44B} Send me a text or voice message and I'll save it to your Obsidian vault.\n\n\u2022 #tag \u2192 adds a tag\n\u2022 #todo \u2192 adds a task (I'll ask sprint or backlog)\n\u2022 Forward a message \u2192 source is recorded\n\u2022 /status \u2192 shows the last saved file"
+      );
+      this.settings.lastUpdateId = update.update_id;
+      await this.saveData(this.settings);
+      return;
+    }
+    if ((_b = msg.text) == null ? void 0 : _b.startsWith("/")) {
+      await this.sendMessage(msg.from.id, "\u26A0\uFE0F Unknown command. Send /help to see what I can do.");
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -159,15 +184,18 @@ Last saved: ${last}`);
     const colonIdx = data.indexOf(":");
     const dest = data.slice(0, colonIdx);
     const msgId = parseInt(data.slice(colonIdx + 1));
-    const tasks = this.pendingTasks.get(msgId);
-    this.settings.lastUpdateId = updateId;
-    await this.saveData(this.settings);
-    if (!tasks || !["sprint", "backlog"].includes(dest))
+    const tasks = this.settings.pendingTasks[String(msgId)];
+    if (!tasks || !["sprint", "backlog"].includes(dest)) {
+      this.settings.lastUpdateId = updateId;
+      await this.saveData(this.settings);
       return;
-    this.pendingTasks.delete(msgId);
+    }
+    delete this.settings.pendingTasks[String(msgId)];
     const targetPath = dest === "sprint" ? this.settings.sprintPath || "daily.todos.4.md" : this.settings.todosPath || "backlog.md";
     const label = dest === "sprint" ? "sprint" : "backlog";
     await this.appendTodos(tasks, targetPath, cq.from.id, label);
+    this.settings.lastUpdateId = updateId;
+    await this.saveData(this.settings);
   }
   async handleVoice(msg, updateId) {
     if (!msg.voice || !msg.from)
@@ -263,6 +291,7 @@ Content-Type: audio/ogg\r
   async processTodosMessage(text, msgId, chatId) {
     const lines = [];
     const taskTexts = [];
+    let todoMode = false;
     for (const raw of text.split("\n")) {
       const line = raw.trim();
       if (!line)
@@ -273,18 +302,29 @@ Content-Type: audio/ogg\r
         if (taskText) {
           lines.push(`- [ ] ${taskText}`);
           taskTexts.push(taskText);
+        } else {
+          todoMode = true;
         }
       } else if (lineTags.includes("todos")) {
+        todoMode = false;
         const contextText = line.replace(/#todos\b/giu, "").replace(/\s{2,}/g, " ").trim();
         if (contextText)
           lines.push(contextText);
+      } else if (todoMode) {
+        lines.push(`- [ ] ${line}`);
+        taskTexts.push(line);
       } else {
         lines.push(line);
       }
     }
     if (!lines.length)
       return true;
-    this.pendingTasks.set(msgId, lines);
+    if (this.settings.autoRouteToSprint) {
+      await this.appendTodos(lines, this.settings.sprintPath || "daily.todos.4.md", chatId, "sprint");
+      return true;
+    }
+    this.settings.pendingTasks[String(msgId)] = lines;
+    await this.saveData(this.settings);
     const preview = taskTexts.length ? taskTexts.map((t) => `\u2022 ${t.length > 50 ? t.slice(0, 50) + "\u2026" : t}`).join("\n") : lines[0];
     await this.sendMessageWithButtons(
       chatId,
@@ -305,8 +345,16 @@ ${preview}`,
       const entry = lines.join("\n") + "\n";
       if (existing instanceof import_obsidian.TFile) {
         const content = await this.app.vault.read(existing);
-        const separator = content.endsWith("\n") ? "" : "\n";
-        await this.app.vault.modify(existing, content + separator + entry);
+        const inboxHeading = "\n##### \u0412\u0445\u043E\u0434\u044F\u0449\u0438\u0435";
+        const inboxIdx = content.indexOf(inboxHeading);
+        if (inboxIdx !== -1) {
+          const afterHeading = content.indexOf("\n", inboxIdx + 1);
+          const insertAt = afterHeading !== -1 ? afterHeading : content.length;
+          await this.app.vault.modify(existing, content.slice(0, insertAt) + "\n" + entry + content.slice(insertAt));
+        } else {
+          const separator = content.endsWith("\n") ? "" : "\n";
+          await this.app.vault.modify(existing, content + separator + entry);
+        }
       } else {
         await this.app.vault.create(filePath, entry);
       }
@@ -418,6 +466,12 @@ var TelegramInboxSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Backlog Path").setDesc("File for backlog tasks (messages with #todo \u2192 'To backlog' button)").addText(
       (t) => t.setPlaceholder("backlog.md").setValue(this.plugin.settings.todosPath).onChange(async (v) => {
         this.plugin.settings.todosPath = v.trim() || "backlog.md";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Always add to sprint").setDesc("Skip the sprint/backlog choice and send #todo tasks directly to the sprint file").addToggle(
+      (t) => t.setValue(this.plugin.settings.autoRouteToSprint).onChange(async (v) => {
+        this.plugin.settings.autoRouteToSprint = v;
         await this.plugin.saveSettings();
       })
     );

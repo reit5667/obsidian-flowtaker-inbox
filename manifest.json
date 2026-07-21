@@ -1,9 +1,9 @@
 {
   "id": "flowtaker-inbox",
   "name": "Flowtaker Inbox",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "minAppVersion": "1.4.0",
-  "description": "Save Telegram messages directly to your vault inbox. No server required.",
+  "description": "Save Telegram messages directly to your vault inbox.",
   "author": "Vadim Sharavin",
   "authorUrl": "https://github.com/reit5667",
   "isDesktopOnly": true

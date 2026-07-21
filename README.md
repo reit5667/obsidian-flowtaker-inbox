@@ -1,6 +1,6 @@
 # Flowtaker Inbox
 
-Send messages from Telegram to your Obsidian vault — no server required.
+Send messages from Telegram to your Obsidian vault.
 
 The bot runs directly inside Obsidian. Text yourself a note, tag a task, or send a voice message — it lands in your vault within seconds.
 
@@ -39,6 +39,8 @@ Your message text here
 ## Setup
 
 ### 1. Create a Telegram bot
+
+Each user needs their own bot — the plugin polls Telegram directly from your computer, so a shared bot can't tell which vault a message belongs to.
 
 1. Open [@BotFather](https://t.me/BotFather)
 2. Send `/newbot` → set a name and username

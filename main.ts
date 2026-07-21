@@ -10,6 +10,8 @@ interface Settings {
   lastUpdateId: number;
   groqApiKey: string;
   lastSavedFile: string;
+  autoRouteToSprint: boolean;
+  pendingTasks: Record<string, string[]>;
 }
 
 const DEFAULTS: Settings = {
@@ -22,6 +24,8 @@ const DEFAULTS: Settings = {
   lastUpdateId: 0,
   groqApiKey: "",
   lastSavedFile: "",
+  autoRouteToSprint: false,
+  pendingTasks: {},
 };
 
 // --- Telegram API types ---
@@ -72,13 +76,15 @@ interface TgUpdate {
 // --- Helpers ---
 
 function buildFilename(utcSec: number): string {
-  const d = new Date((utcSec + 3 * 3600) * 1000);
+  const d = new Date(utcSec * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getUTCDate())}${p(d.getUTCMonth() + 1)}${d.getUTCFullYear()}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}.md`;
+  return `${p(d.getDate())}${p(d.getMonth() + 1)}${d.getFullYear()}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.md`;
 }
 
 function buildIso(utcSec: number): string {
-  return new Date((utcSec + 3 * 3600) * 1000).toISOString().slice(0, 19);
+  const d = new Date(utcSec * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function getForwardedFrom(msg: TgMessage): string | null {
@@ -118,7 +124,7 @@ function buildContent(text: string, utcSec: number, forwardedFrom: string | null
 
 export default class TelegramInboxPlugin extends Plugin {
   settings: Settings;
-  private pendingTasks = new Map<number, string[]>();
+  private isPolling = false;
 
   async onload() {
     await this.loadSettings();
@@ -134,8 +140,11 @@ export default class TelegramInboxPlugin extends Plugin {
 
   async poll() {
     if (!this.settings.botToken || !this.settings.allowedUserId) return;
+    if (this.isPolling) return;
+    this.isPolling = true;
     try {
-      const url = `https://api.telegram.org/bot${this.settings.botToken}/getUpdates?offset=${this.settings.lastUpdateId + 1}&timeout=5&limit=100`;
+      const allowedUpdates = encodeURIComponent(JSON.stringify(["message", "callback_query"]));
+      const url = `https://api.telegram.org/bot${this.settings.botToken}/getUpdates?offset=${this.settings.lastUpdateId + 1}&timeout=5&limit=100&allowed_updates=${allowedUpdates}`;
       const res = await requestUrl({ url });
       const data = res.json as { ok: boolean; result: TgUpdate[] };
       if (!data.ok || !data.result.length) return;
@@ -144,6 +153,8 @@ export default class TelegramInboxPlugin extends Plugin {
       }
     } catch (e) {
       console.error("TelegramInbox poll error:", e);
+    } finally {
+      this.isPolling = false;
     }
   }
 
@@ -164,6 +175,27 @@ export default class TelegramInboxPlugin extends Plugin {
     if (msg.text === "/status") {
       const last = this.settings.lastSavedFile || "none";
       await this.sendMessage(msg.from.id, `✅ Plugin is running.\nLast saved: ${last}`);
+      this.settings.lastUpdateId = update.update_id;
+      await this.saveData(this.settings);
+      return;
+    }
+
+    if (msg.text === "/start" || msg.text === "/help") {
+      await this.sendMessage(
+        msg.from.id,
+        "👋 Send me a text or voice message and I'll save it to your Obsidian vault.\n\n" +
+        "• #tag → adds a tag\n" +
+        "• #todo → adds a task (I'll ask sprint or backlog)\n" +
+        "• Forward a message → source is recorded\n" +
+        "• /status → shows the last saved file"
+      );
+      this.settings.lastUpdateId = update.update_id;
+      await this.saveData(this.settings);
+      return;
+    }
+
+    if (msg.text?.startsWith("/")) {
+      await this.sendMessage(msg.from.id, "⚠️ Unknown command. Send /help to see what I can do.");
       this.settings.lastUpdateId = update.update_id;
       await this.saveData(this.settings);
       return;
@@ -200,19 +232,23 @@ export default class TelegramInboxPlugin extends Plugin {
     const dest = data.slice(0, colonIdx);
     const msgId = parseInt(data.slice(colonIdx + 1));
 
-    const tasks = this.pendingTasks.get(msgId);
-    this.settings.lastUpdateId = updateId;
-    await this.saveData(this.settings);
+    const tasks = this.settings.pendingTasks[String(msgId)];
 
-    if (!tasks || !["sprint", "backlog"].includes(dest)) return;
+    if (!tasks || !["sprint", "backlog"].includes(dest)) {
+      this.settings.lastUpdateId = updateId;
+      await this.saveData(this.settings);
+      return;
+    }
 
-    this.pendingTasks.delete(msgId);
+    delete this.settings.pendingTasks[String(msgId)];
     const targetPath = dest === "sprint"
       ? (this.settings.sprintPath || "daily.todos.4.md")
       : (this.settings.todosPath || "backlog.md");
     const label = dest === "sprint" ? "sprint" : "backlog";
 
     await this.appendTodos(tasks, targetPath, cq.from.id, label);
+    this.settings.lastUpdateId = updateId;
+    await this.saveData(this.settings);
   }
 
   async handleVoice(msg: TgMessage, updateId: number) {
@@ -308,6 +344,7 @@ export default class TelegramInboxPlugin extends Plugin {
   async processTodosMessage(text: string, msgId: number, chatId: number): Promise<boolean> {
     const lines: string[] = [];
     const taskTexts: string[] = [];
+    let todoMode = false;
 
     for (const raw of text.split("\n")) {
       const line = raw.trim();
@@ -315,10 +352,19 @@ export default class TelegramInboxPlugin extends Plugin {
       const lineTags = extractTags(line);
       if (lineTags.includes("todo") && !lineTags.includes("todos")) {
         const taskText = line.replace(/#todo\b/giu, "").replace(/\s{2,}/g, " ").trim();
-        if (taskText) { lines.push(`- [ ] ${taskText}`); taskTexts.push(taskText); }
+        if (taskText) {
+          lines.push(`- [ ] ${taskText}`);
+          taskTexts.push(taskText);
+        } else {
+          todoMode = true;
+        }
       } else if (lineTags.includes("todos")) {
+        todoMode = false;
         const contextText = line.replace(/#todos\b/giu, "").replace(/\s{2,}/g, " ").trim();
         if (contextText) lines.push(contextText);
+      } else if (todoMode) {
+        lines.push(`- [ ] ${line}`);
+        taskTexts.push(line);
       } else {
         lines.push(line);
       }
@@ -326,7 +372,13 @@ export default class TelegramInboxPlugin extends Plugin {
 
     if (!lines.length) return true;
 
-    this.pendingTasks.set(msgId, lines);
+    if (this.settings.autoRouteToSprint) {
+      await this.appendTodos(lines, this.settings.sprintPath || "daily.todos.4.md", chatId, "sprint");
+      return true;
+    }
+
+    this.settings.pendingTasks[String(msgId)] = lines;
+    await this.saveData(this.settings);
 
     const preview = taskTexts.length
       ? taskTexts.map(t => `• ${t.length > 50 ? t.slice(0, 50) + "…" : t}`).join("\n")
@@ -348,8 +400,16 @@ export default class TelegramInboxPlugin extends Plugin {
       const entry = lines.join("\n") + "\n";
       if (existing instanceof TFile) {
         const content = await this.app.vault.read(existing);
-        const separator = content.endsWith("\n") ? "" : "\n";
-        await this.app.vault.modify(existing, content + separator + entry);
+        const inboxHeading = "\n##### Входящие";
+        const inboxIdx = content.indexOf(inboxHeading);
+        if (inboxIdx !== -1) {
+          const afterHeading = content.indexOf("\n", inboxIdx + 1);
+          const insertAt = afterHeading !== -1 ? afterHeading : content.length;
+          await this.app.vault.modify(existing, content.slice(0, insertAt) + "\n" + entry + content.slice(insertAt));
+        } else {
+          const separator = content.endsWith("\n") ? "" : "\n";
+          await this.app.vault.modify(existing, content + separator + entry);
+        }
       } else {
         await this.app.vault.create(filePath, entry);
       }
@@ -503,6 +563,17 @@ class TelegramInboxSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.todosPath)
           .onChange(async (v) => {
             this.plugin.settings.todosPath = v.trim() || "backlog.md";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Always add to sprint")
+      .setDesc("Skip the sprint/backlog choice and send #todo tasks directly to the sprint file")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoRouteToSprint)
+          .onChange(async (v) => {
+            this.plugin.settings.autoRouteToSprint = v;
             await this.plugin.saveSettings();
           })
       );
